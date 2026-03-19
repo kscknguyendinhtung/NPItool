@@ -21,7 +21,9 @@ import {
   FileSpreadsheet,
   FileText as FileIcon,
   Image as ImageIcon,
-  Presentation
+  Presentation,
+  LogOut,
+  LogIn
 } from 'lucide-react';
 import { ProjectPart } from './types';
 import Dashboard from './components/Dashboard';
@@ -33,7 +35,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { saveAs } from 'file-saver';
 import * as XLSX from 'xlsx';
 import { toPng } from 'html-to-image';
-// Firebase removed
+import { auth, db, signInWithGoogle, logout, onAuthStateChanged, User, handleFirestoreError, OperationType } from './firebase';
+import { collection, query, where, onSnapshot, setDoc, doc, deleteDoc } from 'firebase/firestore';
 
 const MOCK_DATA: ProjectPart[] = [
   {
@@ -155,6 +158,8 @@ const MOCK_DATA: ProjectPart[] = [
 export default function App() {
   const [parts, setParts] = useState<ProjectPart[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxrIGSF7Xizp31yFDdSk65COG-rwtDFnbwn8PiRIQa1aLKaKW5zZ9GvDOrXFE1eokWNxg/exec';
   const [scriptUrl, setScriptUrl] = useState<string>((import.meta as any).env?.VITE_GOOGLE_SCRIPT_URL || DEFAULT_SCRIPT_URL);
   const [activeView, setActiveView] = useState<'dashboard' | 'timeline' | 'table' | 'issues'>('dashboard');
@@ -169,6 +174,19 @@ export default function App() {
   const isResizing = useRef(false);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
+  // Auth listener (Firebase)
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    // If setup was declined, we might still want to show mock data
+    setTimeout(() => {
+      if (!isAuthReady) setIsAuthReady(true);
+    }, 2000);
+    return () => unsubscribe();
+  }, []);
+
   const loadSheetsData = async () => {
     if (!scriptUrl || scriptUrl.includes('YOUR_GOOGLE_SCRIPT_URL')) {
       setParts(MOCK_DATA);
@@ -176,7 +194,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`/api/sheets?url=${encodeURIComponent(scriptUrl)}`);
+      const res = await fetch(`/api/proxy/sheets?url=${encodeURIComponent(scriptUrl)}`);
       if (res.ok) {
         const data = await res.json();
         if (data && Array.isArray(data) && data.length > 0) {
@@ -199,6 +217,38 @@ export default function App() {
     loadSheetsData();
   }, [scriptUrl]);
 
+  // Firestore listener (as fallback or secondary)
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    if (!user || !db) {
+      if (parts.length === 0) {
+        setParts(MOCK_DATA);
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    const q = query(collection(db, 'parts'), where('uid', '==', user.uid));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const partsData = snapshot.docs.map(doc => ({ ...doc.data() } as ProjectPart));
+      if (partsData.length > 0) {
+        setParts(partsData);
+      } else if (parts.length === 0) {
+        setParts(MOCK_DATA.map(p => ({ ...p, uid: user.uid })));
+      }
+      setIsLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'parts');
+      if (parts.length === 0) {
+        setParts(MOCK_DATA);
+        setIsLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user, isAuthReady, scriptUrl]);
+
   const handlePartUpdate = async (updatedPart: ProjectPart) => {
     const newParts = parts.map(p => p.id === updatedPart.id ? updatedPart : p);
     setParts(newParts);
@@ -208,13 +258,23 @@ export default function App() {
     if (scriptUrl) {
       saveToSheets(newParts);
     }
+
+    // Save to Firebase if connected
+    if (user) {
+      try {
+        const partWithUid = { ...updatedPart, uid: user.uid };
+        await setDoc(doc(db, 'parts', updatedPart.id), partWithUid);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `parts/${updatedPart.id}`);
+      }
+    }
   };
 
   const saveToSheets = async (data: ProjectPart[]) => {
     if (!scriptUrl) return;
     setIsSyncing(true);
     try {
-      const res = await fetch(`/api/sheets?url=${encodeURIComponent(scriptUrl)}`, {
+      const res = await fetch(`/api/proxy/sheets?url=${encodeURIComponent(scriptUrl)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
@@ -251,13 +311,27 @@ export default function App() {
     if (scriptUrl) {
       saveToSheets(updatedPartsList);
     }
+
+    if (user) {
+      try {
+        for (const part of newParts) {
+          await setDoc(doc(db, 'parts', part.id), { ...part, uid: user.uid });
+        }
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, 'parts');
+      }
+    }
   };
 
   const handleModelStatusUpdate = async (project: string, status: string) => {
-    const updatedPartsList = parts.map(p => p.project === project ? { ...p, modelStatus: status } : p);
-    setParts(updatedPartsList);
-    if (scriptUrl) {
-      saveToSheets(updatedPartsList);
+    if (!user) return;
+    try {
+      const projectParts = parts.filter(p => p.project === project);
+      for (const part of projectParts) {
+        await setDoc(doc(db, 'parts', part.id), { ...part, modelStatus: status, uid: user.uid });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'parts');
     }
   };
 
@@ -471,6 +545,32 @@ export default function App() {
               </div>
             )}
 
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="flex flex-col items-end hidden sm:flex">
+                  <span className="text-xs font-bold text-stone-800">{user.displayName}</span>
+                  <span className="text-[10px] text-stone-400">{user.email}</span>
+                </div>
+                <button 
+                  onClick={logout}
+                  className="p-2 hover:bg-red-50 text-stone-400 hover:text-red-500 rounded-lg transition-colors"
+                  title="Logout"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+                <div className="w-8 h-8 rounded-full bg-stone-200 border border-black/5 overflow-hidden">
+                  <img src={user.photoURL || ''} alt="Avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                </div>
+              </div>
+            ) : (
+              <button 
+                onClick={signInWithGoogle}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-95"
+              >
+                <LogIn className="w-4 h-4" />
+                LOGIN WITH GOOGLE
+              </button>
+            )}
             <button 
               onClick={() => setIsChatVisible(!isChatVisible)}
               className={`p-2 rounded-lg transition-colors flex items-center gap-2 text-sm font-bold ${isChatVisible ? 'bg-emerald-50 text-emerald-600' : 'text-stone-500 hover:bg-stone-100'}`}
