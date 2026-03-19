@@ -1,7 +1,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { ProjectPart } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+const apiKey = process.env.GEMINI_API_KEY || '';
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const partSchema = {
   type: Type.OBJECT,
@@ -58,6 +59,7 @@ export async function extractPartsFromExcel(rawData: any[]): Promise<ProjectPart
     6. Return an array of parts.
   `;
 
+  if (!ai) return [];
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: prompt,
@@ -94,6 +96,7 @@ export async function processChatUpdate(
     - responseText: A text response for the user.
   `;
 
+  if (!ai) return { updatedParts: currentParts, responseText: "AI is not configured. Please add GEMINI_API_KEY to environment variables." };
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: prompt,
@@ -131,6 +134,7 @@ export async function getSummary(parts: ProjectPart[]): Promise<string> {
     Data: ${JSON.stringify(parts)}
   `;
 
+  if (!ai) return "AI is not configured. Please add GEMINI_API_KEY to environment variables.";
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: prompt,
