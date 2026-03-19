@@ -170,6 +170,7 @@ export default function App() {
   const [selectedProject, setSelectedProject] = useState<string>('all');
   const [editingPart, setEditingPart] = useState<ProjectPart | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const isResizing = useRef(false);
   const mainContentRef = useRef<HTMLDivElement>(null);
 
@@ -271,14 +272,20 @@ export default function App() {
 
   const saveToSheets = async (data: ProjectPart[]) => {
     if (!scriptUrl) return;
+    setIsSyncing(true);
     try {
-      await fetch(`/api/proxy/sheets?url=${encodeURIComponent(scriptUrl)}`, {
+      const res = await fetch(`/api/proxy/sheets?url=${encodeURIComponent(scriptUrl)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
       });
+      if (res.ok) {
+        console.log("Successfully saved to Sheets");
+      }
     } catch (error) {
       console.error("Failed to save to Sheets:", error);
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -497,8 +504,16 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-1 ml-2">
                   <button 
+                    onClick={() => saveToSheets(parts)}
+                    disabled={isSyncing}
+                    className={`p-1.5 rounded transition-all ${isSyncing ? 'bg-emerald-200 text-emerald-400' : 'hover:bg-emerald-100 text-emerald-600'}`}
+                    title="Push Data to Sheets Now"
+                  >
+                    <Save className={`w-3.5 h-3.5 ${isSyncing ? 'animate-pulse' : ''}`} />
+                  </button>
+                  <button 
                     onClick={() => setScriptUrl('')}
-                    className="p-1 hover:bg-red-100 rounded text-red-500 transition-colors"
+                    className="p-1.5 hover:bg-red-100 rounded text-red-500 transition-colors"
                     title="Disable Sync"
                   >
                     <X className="w-3.5 h-3.5" />
